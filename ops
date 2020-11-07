@@ -1,0 +1,477 @@
+#!/bin/bash
+
+# []: optional, (): required, <name>: fill with sth, |: or, ...: multiple
+# ops [
+#   init [-b|--build include build.sh in master]
+#        [-i|--install include install.sh and uninstall.sh in master]
+#        [-s|--start include start.sh in master]
+#        [--clone <repo>]
+#        [--host <git host>]
+#        [--no-config]
+#        (-n|--name) <repo name> [...]|
+#       if --build is present deploying to 'build' branch triggers build.sh and pushes 'release' directory to 'release' branch.
+#   deploy [-h --host <host>|-c --cluster <cluster>|-a --automatic]|
+#       deploy the project. it pushes 'master' to 'release'.
+#       if build.sh is present. pushes 'master' to 'build' wich triggers a build and release will be updated.
+#       --automatic will set the project
+#   rollback [<host>]|
+#       rolls back the release and updates hosts.
+#   config [-h --host <host>|-c --cluster <cluster>|-a --automatic]|
+#       push to a config repository
+#   pm [ls|end|kill|log|stop|start|restart|status] <host>|
+#   host [ls|resolve <host>|add <host> <addr>|remove <host>|rename <host> <name>]|
+#   cluster (ls|add|remove) (-n|--name) <name> (-h|--host) <host> [...]|
+#       when adding if cluster exists the given hosts will be added to existing cluster
+#       if not the cluster will be made with given hosts.
+#       when removing if one or some hosts are specified they will be removed from cluster
+#       if no host is given the whole cluster will be removed.
+#   install|uninstall|
+#   help [<cmd>]
+# ]
+
+# utils :
+
+# 'run ops foo bar' => 'ops foo bar'
+# 'run any' => 'any'
+# 'run' => 'ops'
+ctx="ops"
+run () {
+    ctx="$ctx"_${1:-main}
+    shift
+    $ctx $@
+}
+
+# use shh to init ops in remote and do requested commands
+# echo "cmd" | rdo host
+# rdo () {
+#     local h=$1
+#     shift
+#     cat | ssh ${h}
+#     # todo decide to wrap commands and install agent if needed
+# }
+
+need_ops () {
+    if [[ ! -d ~/.ops ]]; then
+        echo need ops installed locally for this command to work.
+        echo do \'./ops install\'
+        exit 1
+    fi
+}
+
+
+init_git_config () {
+    [[ ! `git config --get user.name` ]] && git config --local user.name "ops" && git config --local user.email "ops@cicd"
+}
+
+
+
+# install and uninstall ops locally
+ops_install () {
+    [[ -d ~/.ops ]] && return 0
+    mkdir ~/.ops
+    mkdir ~/.ops/.bin
+    mkdir ~/.ops/hosts # use /etc/hosts too
+    mkdir ~/.ops/clusters
+    mkdir ~/.ops/repos
+    # mkdir ~/pm  # on hosts
+    cat ${BASH_SOURCE} > ~/.ops/.bin/ops
+    chmod +x ~/.ops/.bin/ops
+    sudo ln -s ~/.ops/.bin/ops /usr/local/bin
+    # sudo chmod +x /usr/local/bin/ops
+}
+ops_uninstall () {
+    [[ ! -d ~/.ops ]] && return 0
+    sudo unlink /usr/local/bin/ops
+    rm -rf ~/.ops
+}
+
+
+
+# sub commands :
+
+# subcommand template for ./ops yo
+# ops_yo () {
+#     echo yo
+# }
+
+# runs default action
+ops_main () { ops_deploy; } # todo deploy to default location
+
+# create a --bare git repo
+# automated deployments using release,secret branches
+# adds a standalone deploy script for dev
+ops_init () {
+    names=()
+    while [ $# -gt 0 ]; do
+        case $1 in
+            -b|--build)
+                build=1
+                shift
+            ;;
+            -s|--start)
+                start=1
+                shift
+            ;;
+            -i|--install)
+                install=1
+                shift
+            ;;
+            -h|--host)
+                host=$2
+                shift 2
+            ;;
+            -c|--clone)
+                clone=$2
+                shift 2
+            ;;
+            -n|--name)
+                names+=($2)
+                shift 2
+            ;;
+            --no-config)
+                noconf=1
+                shift
+            ;;
+            *)
+                echo unrecognized option or data $1
+                exit 1
+            ;;
+        esac
+    done
+
+    host=`ops_host_resolve ${host}`
+    
+    pushd . > /dev/null
+    for name in "${names[@]}"; do
+        if [[ ${host} ]]; then
+            ssh -t ${host} "
+                if [[ ! -d ~/repos ]]; then
+                    mkdir ~/repos
+                fi
+                if [[ ! -d ~/repos/${name}.git ]]; then
+                    cd ~/repos
+                    mkdir ${name}.git
+                    cd ${name}.git; git init --bare
+                    if [[ ! ${noconf} ]]; then
+                        mkdir ${name}.config.git
+                        cd ../${name}.config.git; git init --bare
+                    fi
+                fi
+            "
+        else
+            need_ops
+            cd ~/.ops/repos/
+            if [[ ! -d ./${name} ]]; then
+                mkdir ${name}.git ${name}.config.git
+                cd ${name}.git; git init --bare
+                cd ${name}.config.git; git init --bare
+            fi
+        fi
+        
+        cd /tmp
+        if [[ ! ${clone} ]]; then
+            if [[ ${host} ]]; then
+                clone=${host}:~/repos/${name}.git
+            else
+                clone=~/.ops/repos/${name}.git
+            fi
+        fi
+        git clone --recurse-submodules ${clone} ${name}
+        cd ${name}
+
+        init_git_config
+
+        if [[ ${host} ]]; then
+            git remote add ops ${host}:~/repos/${name}.git
+        else
+            git remote add ops ~/.ops/repos/${name}.git
+        fi
+
+        git pull --recurse-submodules ops master
+
+        if [[ ${build} && ! -e build.sh ]]; then
+            echo '#!/bin/bash
+# implement build script
+# it must put build files in ./release directory' > ./build.sh
+            git add ./build.sh
+        fi
+        
+        if [[ ${install} ]]; then
+            [[ ! -e install.sh ]] && echo '#!/bin/bash
+# implement install script
+# it must put program files in related directories' > ./install.sh
+            git add ./install.sh
+
+            [[ ! -e uninstall.sh ]] && echo '#!/bin/bash
+# implement uninstall script
+# it must clean installed program files from related directories' > ./uninstall.sh
+            git add ./uninstall.sh
+        fi
+
+        if [[ ${start} && ! -e start.sh ]]; then
+            echo '#!/bin/bash
+# implement start script
+# it must start the program' > ./start.sh
+            git add ./start.sh
+        fi
+
+        git commit -m "Add initial placeholder scripts"
+
+        git push -u ops master
+        cd ..
+        rm -rf ${name}
+        # done making new repo
+        
+        if [[ ! ${noconf} ]]; then
+            # make config repo
+            if [[ ${host} ]]; then
+                clone=${host}:~/repos/${name}.config.git
+            else
+                clone=~/.ops/repos/${name}.config.git
+            fi
+            git clone ${clone} ${name}
+            cd ${name}.config
+
+            if [[ ${host} ]]; then
+                git remote add ops ${host}:~/repos/${name}.config.git
+            else
+                git remote add ops ~/.ops/repos/${name}.config.git
+            fi
+
+            git pull ops master
+
+            if [[ ! -e .env ]]; then
+                echo '# this file will be sourced on start' > .env
+                git add .env
+            fi
+
+            git commit -m "Add initial config"
+            
+            git push -u ops master
+            cd ..
+            rm -rf ${name}.config
+        fi
+    done
+    popd > /dev/null
+}
+
+# deploy current project to a set of hosts
+ops_deploy () {
+    echo deploing
+}
+
+# process manager of ops
+ops_pm () { run $@; }
+# run default pm action
+ops_pm_main () { ops_pm_ls; }
+# list all processes
+ops_pm_ls () {
+    echo pm_lsing
+}
+# start a process
+ops_pm_start () {
+    echo pm_starting
+}
+
+# todo add other pm functions
+
+# host manager
+ops_host () {
+    need_ops
+    run $@;
+}
+# run default host action
+ops_host_main () { ops_host_ls; }
+# list hosts
+ops_host_ls () {
+    ls ~/.ops/hosts
+}
+# shows what does <host> resolve to
+# if a host resolves to itself its probably not saved
+ops_host_resolve () {
+    if [[ $1 && -d ~/.ops && -d ~/.ops/hosts/ && -d ~/.ops/hosts/$1 ]]; then
+        cat ~/.ops/hosts/$1/resolve
+        echo
+        return 0
+    fi
+    echo $1
+}
+# add a host to ops 'ops host add <name> <addr>'
+ops_host_add () {
+    if [[ $1 && -d ~/.ops/hosts/$1 ]]; then
+        echo host $1 already exists.
+        exit 1
+    fi
+    mkdir ~/.ops/hosts/$1
+    echo -n "$2" > ~/.ops/hosts/$1/resolve
+}
+# removes a host from ops and clusters 'ops host remove <name>'
+ops_host_remove () {
+    if [[ $1 && -d ~/.ops/hosts/$1 ]]; then
+        rm -rf ~/.ops/hosts/$1
+        return 0
+    fi
+
+    for cluster in `ops_cluster_ls`; do
+        ops_cluster_remove -n ${cluster} -h $1
+    done
+}
+
+# rename a host. it updates clusters if host was in one
+ops_host_rename () {
+    if [[ ! -d ~/.ops/hosts/$1 ]]; then
+        echo host $1 does not exist.
+        exit 1
+    elif [[ -d ~/.ops/hosts/$2 ]]; then
+        echo host $2 exists. can not rename to it
+        exit 1
+    fi    
+    mv ~/.ops/hosts/$1 ~/.ops/hosts/$2
+    
+    # search every cluster for $1 and rename to $2
+    for cluster in `ops_cluster_ls`; do
+        hosts="`ops_cluster_ls -n ${cluster}`"
+        for host in ${hosts}; do
+            if [[ ${host} == $1 ]]; then
+                ops_cluster_remove -n ${cluster} -h $1
+                ops_cluster_add -n ${cluster} -h $2
+                break
+            fi
+        done
+    done
+}
+
+
+# manage a set of hosts using ops cluster
+ops_cluster () {
+    need_ops
+    run $@;
+}
+# run default cluster action
+ops_cluster_main () { ops_cluster_ls; }
+
+# list saved clusters
+ops_cluster_ls () {
+    names=()
+    while [ $# -gt 0 ]; do
+        case $1 in
+            -n|--name)
+                names+=($2)
+                shift 2
+            ;;
+            *)
+                echo unrecognized option or data $1
+                exit 1
+            ;;
+        esac
+    done
+    for name in "${names[@]}"; do
+        if [[ ${name} ]]; then
+            if [[ ! -d ~/.ops/clusters/${name} ]]; then
+                echo cluster "'${name}'" does not exist. create with "'ops cluster add --name ${name} --host ...'"
+            fi
+            if [[ ${#names[@]} > 1 ]]; then
+                echo ${name}:
+            fi
+            cat ~/.ops/clusters/${name}/resolve
+            echo
+        fi
+    done
+
+    if [[ ${#names[@]} == 0 ]]; then
+        ls ~/.ops/clusters
+    fi
+}
+
+# add a cluster or add hosts to existing cluster
+ops_cluster_add () {
+    hosts=()
+    while [ $# -gt 0 ]; do
+        case $1 in
+            -h|--host)
+                hosts+=($2)
+                shift 2
+            ;;
+            -n|--name)
+                name=$2
+                shift 2
+            ;;
+            *)
+                echo unrecognized option or data $1
+                exit 1
+            ;;
+        esac
+    done
+
+    if [[ ! ${name} ]]; then
+        echo specify a name '--name <name>'
+        exit 1
+    fi
+
+    if [[ "${#hosts[@]}" == 0 ]]; then
+        echo specify one or more hosts '--host <host>'
+        exit 1
+    fi
+
+    if [[ ! -d ~/.ops/clusters/${name} ]]; then
+        mkdir ~/.ops/clusters/${name}
+        touch ~/.ops/clusters/${name}/resolve
+    fi
+
+    echo -n "`cat ~/.ops/clusters/${name}/resolve` ${hosts[@]}" > ~/.ops/clusters/${name}/resolve
+
+    # done, make sure no duplicate is in resolve file
+    declare -A hmap
+    for host in `cat ~/.ops/clusters/${name}/resolve`; do
+        hmap[${host}]=${host}
+    done
+    echo -n "${hmap[@]}" > ~/.ops/clusters/${name}/resolve
+}
+
+# remove a cluster or remove hosts from cluster
+ops_cluster_remove () {
+    hosts=()
+    while [ $# -gt 0 ]; do
+        case $1 in
+            -h|--host)
+                hosts+=($2)
+                shift 2
+            ;;
+            -n|--name)
+                name=$2
+                shift 2
+            ;;
+            *)
+                echo unrecognized option or data $1
+                exit 1
+            ;;
+        esac
+    done
+
+    if [[ ! ${name} ]]; then
+        echo specify a name '--name <name>'
+        exit 1
+    elif [[ ! -d ~/.ops/clusters/${name} ]]; then
+        echo cluster ${name} does not exist
+        exit 1
+    fi
+
+    if [[ "${#hosts[@]}" == 0 ]]; then
+        rm -rf ~/.ops/clusters/${name}
+    else
+        declare -A hmap
+        for host in `cat ~/.ops/clusters/${name}/resolve`; do
+            hmap[${host}]=${host}
+        done
+        for host in "${hosts[@]}"; do
+            unset hmap[${host}]
+        done
+        echo -n "${hmap[@]}" > ~/.ops/clusters/${name}/resolve
+    fi
+}
+
+ops_help () {
+    echo helping
+}
+
+run $@
