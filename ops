@@ -20,7 +20,7 @@
 #       push to a config repository
 #   pm [ls|end|kill|log|stop|start|restart|status] <host>|
 #   host [ls|resolve <host>|add <host> <addr>|remove <host>|rename <host> <name>]|
-#   cluster (ls|add|remove) (-n|--name) <name> (-h|--host) <host> [...]|
+#   cluster (ls|add|remove) <name> [<host> ...]|
 #       when adding if cluster exists the given hosts will be added to existing cluster
 #       if not the cluster will be made with given hosts.
 #       when removing if one or some hosts are specified they will be removed from cluster
@@ -41,57 +41,34 @@ run () {
     $ctx $@
 }
 
-# use shh to init ops in remote and do requested commands
-# echo "cmd" | rdo host
-# rdo () {
-#     local h=$1
-#     shift
-#     cat | ssh ${h}
-#     # todo decide to wrap commands and install agent if needed
-# }
-
-need_ops () {
-    if [[ ! -d ~/.ops ]]; then
-        echo need ops installed locally for this command to work.
-        echo do \'./ops install\'
-        exit 1
-    fi
-}
-
 
 init_git_config () {
     [[ ! `git config --get user.name` ]] && git config --local user.name "ops" && git config --local user.email "ops@cicd"
 }
 
 
-
 # install and uninstall ops locally
 ops_install () {
-    [[ -d ~/.ops ]] && return 0
-    mkdir ~/.ops
-    mkdir ~/.ops/.bin
-    mkdir ~/.ops/hosts # use /etc/hosts too
-    mkdir ~/.ops/clusters
-    mkdir ~/.ops/repos
-    # mkdir ~/pm  # on hosts
-    cat ${BASH_SOURCE} > ~/.ops/.bin/ops
-    chmod +x ~/.ops/.bin/ops
-    sudo ln -s ~/.ops/.bin/ops /usr/local/bin
-    # sudo chmod +x /usr/local/bin/ops
+    # if already installed
+    which ops &> /dev/null && return 0
+    sudo touch /etc/clusters
+    [[ ! -d ~/.ops_repos ]] && mkdir ~/.ops_repos
+    cat ${BASH_SOURCE} | sudo tee /usr/local/bin/ops &> /dev/null
+    sudo chmod +x /usr/local/bin/ops
 }
 ops_uninstall () {
-    [[ ! -d ~/.ops ]] && return 0
-    sudo unlink /usr/local/bin/ops
-    rm -rf ~/.ops
+    # if already not installed
+    which ops &> /dev/null || return 0
+    sudo rm /usr/local/bin/ops
 }
 
 
 
 # sub commands :
 
-# subcommand template for ./ops yo
+# subcommand template for ./ops yo <1> <2>
 # ops_yo () {
-#     echo yo
+#     echo yoing $1 $2
 # }
 
 # runs default action
@@ -138,8 +115,6 @@ ops_init () {
             ;;
         esac
     done
-
-    host=`ops_host_resolve ${host}`
     
     pushd . > /dev/null
     for name in "${names[@]}"; do
@@ -159,8 +134,8 @@ ops_init () {
                 fi
             "
         else
-            need_ops
-            cd ~/.ops/repos/
+            [[ ! -d ~/.ops_repos ]] && mkdri ~/.ops_repos
+            cd ~/.ops_repos/
             if [[ ! -d ./${name} ]]; then
                 mkdir ${name}.git ${name}.config.git
                 cd ${name}.git; git init --bare
@@ -173,7 +148,7 @@ ops_init () {
             if [[ ${host} ]]; then
                 clone=${host}:~/repos/${name}.git
             else
-                clone=~/.ops/repos/${name}.git
+                clone=~/.ops_repos/${name}.git
             fi
         fi
         git clone --recurse-submodules ${clone} ${name}
@@ -184,7 +159,7 @@ ops_init () {
         if [[ ${host} ]]; then
             git remote add ops ${host}:~/repos/${name}.git
         else
-            git remote add ops ~/.ops/repos/${name}.git
+            git remote add ops ~/.ops_repos/${name}.git
         fi
 
         git pull --recurse-submodules ops master
@@ -227,7 +202,7 @@ ops_init () {
             if [[ ${host} ]]; then
                 clone=${host}:~/repos/${name}.config.git
             else
-                clone=~/.ops/repos/${name}.config.git
+                clone=~/.ops_repos/${name}.config.git
             fi
             git clone ${clone} ${name}
             cd ${name}.config
@@ -235,7 +210,7 @@ ops_init () {
             if [[ ${host} ]]; then
                 git remote add ops ${host}:~/repos/${name}.config.git
             else
-                git remote add ops ~/.ops/repos/${name}.config.git
+                git remote add ops ~/.ops_repos/${name}.config.git
             fi
 
             git pull ops master
@@ -276,199 +251,132 @@ ops_pm_start () {
 # todo add other pm functions
 
 # host manager
-ops_host () {
-    need_ops
-    run $@;
-}
+ops_host () { run $@; }
 # run default host action
 ops_host_main () { ops_host_ls; }
 # list hosts
 ops_host_ls () {
-    ls ~/.ops/hosts
-}
-# shows what does <host> resolve to
-# if a host resolves to itself its probably not saved
-ops_host_resolve () {
-    if [[ $1 && -d ~/.ops && -d ~/.ops/hosts/ && -d ~/.ops/hosts/$1 ]]; then
-        cat ~/.ops/hosts/$1/resolve
-        echo
-        return 0
-    fi
-    echo $1
+    cat /etc/hosts
 }
 # add a host to ops 'ops host add <name> <addr>'
 ops_host_add () {
-    if [[ $1 && -d ~/.ops/hosts/$1 ]]; then
-        echo host $1 already exists.
-        exit 1
+    name=$1
+    addr=$2
+    if [[ `grep -E "\s${name}$" /etc/hosts` ]]; then
+        ssh-copy-id ${name}
+        return 0
     fi
-    mkdir ~/.ops/hosts/$1
-    echo -n "$2" > ~/.ops/hosts/$1/resolve
+    echo "${addr} ${name}" | sudo tee -a /etc/hosts &> /dev/null
+    ssh-copy-id ${name}
 }
 # removes a host from ops and clusters 'ops host remove <name>'
 ops_host_remove () {
-    if [[ $1 && -d ~/.ops/hosts/$1 ]]; then
-        rm -rf ~/.ops/hosts/$1
-        return 0
-    fi
-
-    for cluster in `ops_cluster_ls`; do
-        ops_cluster_remove -n ${cluster} -h $1
-    done
+    name=$1
+    grep -ve "\s${name}$" /etc/hosts | sudo tee /etc/hosts &> /dev/null
+    sed -E "/s/${name}\s//g" /etc/clusters | sudo tee /etc/clusters &> /dev/null
 }
 
 # rename a host. it updates clusters if host was in one
 ops_host_rename () {
-    if [[ ! -d ~/.ops/hosts/$1 ]]; then
-        echo host $1 does not exist.
+    name1=$1
+    name2=$2
+    if [[ ! `grep -E "\s${name1}$" /etc/hosts` ]]; then
+        echo host ${name1} does not exist.
         exit 1
-    elif [[ -d ~/.ops/hosts/$2 ]]; then
-        echo host $2 exists. can not rename to it
+    elif [[ `grep -E "\s${name2}$" /etc/hosts` ]]; then
+        echo host ${name2} exists. can not rename to it
         exit 1
-    fi    
-    mv ~/.ops/hosts/$1 ~/.ops/hosts/$2
-    
-    # search every cluster for $1 and rename to $2
-    for cluster in `ops_cluster_ls`; do
-        hosts="`ops_cluster_ls -n ${cluster}`"
-        for host in ${hosts}; do
-            if [[ ${host} == $1 ]]; then
-                ops_cluster_remove -n ${cluster} -h $1
-                ops_cluster_add -n ${cluster} -h $2
-                break
-            fi
-        done
-    done
+    fi
+
+    sed -E "s/${name1}$/${name2}/g" /etc/hosts | sudo tee /etc/hosts &> /dev/null
+    sed -E "s/${name1}\s/${name2}/g" /etc/clusters | sudo tee /etc/clusters &> /dev/null
 }
 
 
 # manage a set of hosts using ops cluster
 ops_cluster () {
-    need_ops
+    [[ ! -e /etc/clusters ]] && sudo touch /etc/clusters
     run $@;
 }
 # run default cluster action
 ops_cluster_main () { ops_cluster_ls; }
 
-# list saved clusters
+# list saved clusters 'ops cluster ls'
 ops_cluster_ls () {
-    names=()
-    while [ $# -gt 0 ]; do
-        case $1 in
-            -n|--name)
-                names+=($2)
-                shift 2
-            ;;
-            *)
-                echo unrecognized option or data $1
-                exit 1
-            ;;
-        esac
-    done
-    for name in "${names[@]}"; do
-        if [[ ${name} ]]; then
-            if [[ ! -d ~/.ops/clusters/${name} ]]; then
-                echo cluster "'${name}'" does not exist. create with "'ops cluster add --name ${name} --host ...'"
-            fi
-            if [[ ${#names[@]} > 1 ]]; then
-                echo ${name}:
-            fi
-            cat ~/.ops/clusters/${name}/resolve
-            echo
-        fi
-    done
-
-    if [[ ${#names[@]} == 0 ]]; then
-        ls ~/.ops/clusters
-    fi
+    cat /etc/clusters
 }
 
-# add a cluster or add hosts to existing cluster
+# add a cluster or add hosts to existing cluster 'ops cluster add <name> <host> ...'
 ops_cluster_add () {
+    name=$1
+    shift
     hosts=()
     while [ $# -gt 0 ]; do
-        case $1 in
-            -h|--host)
-                hosts+=($2)
-                shift 2
-            ;;
-            -n|--name)
-                name=$2
-                shift 2
-            ;;
-            *)
-                echo unrecognized option or data $1
-                exit 1
-            ;;
-        esac
+        hosts+=($1)
+        shift
     done
 
     if [[ ! ${name} ]]; then
-        echo specify a name '--name <name>'
+        echo specify a name 'ops cluster add <name> <host> ...'
         exit 1
     fi
 
-    if [[ "${#hosts[@]}" == 0 ]]; then
-        echo specify one or more hosts '--host <host>'
-        exit 1
-    fi
-
-    if [[ ! -d ~/.ops/clusters/${name} ]]; then
-        mkdir ~/.ops/clusters/${name}
-        touch ~/.ops/clusters/${name}/resolve
-    fi
-
-    echo -n "`cat ~/.ops/clusters/${name}/resolve` ${hosts[@]}" > ~/.ops/clusters/${name}/resolve
-
-    # done, make sure no duplicate is in resolve file
-    declare -A hmap
-    for host in `cat ~/.ops/clusters/${name}/resolve`; do
-        hmap[${host}]=${host}
+    # make sure no duplicate is in hosts array and already saved hosts
+    declare -A hostmap
+    for host in "${hosts[@]}"; do
+        hostmap[${host}]=${host}
     done
-    echo -n "${hmap[@]}" > ~/.ops/clusters/${name}/resolve
+    for host in `grep -E "^${name}$|\s${name}$" /etc/clusters | rev | cut -s -d ' ' -f 2- | rev`; do
+        hostmap[${host}]=${host}
+    done
+    hosts="${hostmap[@]}"
+    [[ ${#hostmap[@]} > 0 ]] && hosts="${hosts} "
+    
+    # change /etc/clusters entry or append to it
+    if [[ `grep -E "^${name}$|\s${name}$" /etc/clusters` ]]; then
+        sed -E "s/^${name}$|.*\s${name}$/${hosts}${name}/g" /etc/clusters | sudo tee /etc/clusters &> /dev/null
+    else
+        echo "${hosts}${name}" | sudo tee -a /etc/clusters &> /dev/null
+    fi
 }
 
 # remove a cluster or remove hosts from cluster
 ops_cluster_remove () {
+    name=$1
+    shift
     hosts=()
     while [ $# -gt 0 ]; do
-        case $1 in
-            -h|--host)
-                hosts+=($2)
-                shift 2
-            ;;
-            -n|--name)
-                name=$2
-                shift 2
-            ;;
-            *)
-                echo unrecognized option or data $1
-                exit 1
-            ;;
-        esac
+        hosts+=($1)
+        shift
     done
 
     if [[ ! ${name} ]]; then
-        echo specify a name '--name <name>'
-        exit 1
-    elif [[ ! -d ~/.ops/clusters/${name} ]]; then
-        echo cluster ${name} does not exist
+        echo specify a name 'ops cluster remove <name> [<host> ...]'
         exit 1
     fi
 
     if [[ "${#hosts[@]}" == 0 ]]; then
-        rm -rf ~/.ops/clusters/${name}
+        grep -v -E "^${name}$|.*\s${name}$" /etc/clusters | sudo tee /etc/clusters &> /dev/null
     else
-        declare -A hmap
-        for host in `cat ~/.ops/clusters/${name}/resolve`; do
-            hmap[${host}]=${host}
+        declare -A hostmap
+        for host in `grep -E "^${name}$|\s${name}$" /etc/clusters | rev | cut -s -d ' ' -f 2- | rev`; do
+            hostmap[${host}]=${host}
         done
         for host in "${hosts[@]}"; do
-            unset hmap[${host}]
+            unset hostmap[${host}]
         done
-        echo -n "${hmap[@]}" > ~/.ops/clusters/${name}/resolve
+        hosts="${hostmap[@]}"
+        [[ ${#hostmap[@]} > 0 ]] && hosts="${hosts} "
+
+        # change /etc/clusters entry or append to it
+        if [[ `grep -E "^${name}$|\s${name}$" /etc/clusters` ]]; then
+            sed -E "s/^${name}$|.*\s${name}$/${hosts}${name}/g" /etc/clusters | sudo tee /etc/clusters &> /dev/null
+        else
+            echo "${hosts}${name}" | sudo tee -a /etc/clusters &> /dev/null
+        fi
     fi
 }
+
 
 ops_help () {
     echo helping
