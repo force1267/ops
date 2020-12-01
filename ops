@@ -1,46 +1,17 @@
 #!/bin/bash
 
-# []: optional, (): required, <name>: fill with sth, |: or, ...: multiple
-# ops [
-#   init [-b|--build include build.sh in master]
-#        [-i|--install include install.sh and uninstall.sh in master]
-#        [-s|--start include start.sh in master]
-#        [--clone <repo>]
-#        [--host <git host>]
-#        [--no-config]
-#        (-n|--name) <repo name> [...]|
-#       if --build is present deploying to 'build' branch triggers build.sh and pushes 'release' directory to 'release' branch.
-#   deploy [-h --host <host>|-c --cluster <cluster>|-a --automatic]|
-#       deploy the project. it pushes 'master' to 'release'.
-#       if build.sh is present. pushes 'master' to 'build' wich triggers a build and release will be updated.
-#       --automatic will set the project
-#   rollback [<host>]|
-#       rolls back the release and updates hosts.
-#   config [-h --host <host>|-c --cluster <cluster>|-a --automatic]|
-#       push to a config repository
-#   pm [ls|end|kill|log|stop|start|restart|status] <host>|
-#   host [ls|resolve <host>|add <host> <addr>|remove <host>|rename <host> <name>]|
-#   cluster (ls|add|remove) <name> [<host> ...]|
-#       when adding if cluster exists the given hosts will be added to existing cluster
-#       if not the cluster will be made with given hosts.
-#       when removing if one or some hosts are specified they will be removed from cluster
-#       if no host is given the whole cluster will be removed.
-#   install|uninstall|
-#   help [<cmd>]
-# ]
 
-# utils :
-
-# 'run ops foo bar' => 'ops foo bar'
-# 'run any' => 'any'
-# 'run' => 'ops'
+# dispatcher :
 ctx="ops"
 run () {
     ctx="$ctx"_${1:-main}
     shift
     $ctx $@
 }
-
+# subcommand template for ./ops yo <1> <2>
+# ops_yo () {
+#     echo yoing $1 $2
+# }
 
 init_git_config () {
     [[ ! `git config --get user.name` ]] && git config --local user.name "ops" && git config --local user.email "ops@cicd"
@@ -61,15 +32,6 @@ ops_uninstall () {
     which ops &> /dev/null || return 0
     sudo rm /usr/local/bin/ops
 }
-
-
-
-# sub commands :
-
-# subcommand template for ./ops yo <1> <2>
-# ops_yo () {
-#     echo yoing $1 $2
-# }
 
 # runs default action
 ops_main () { ops_deploy; } # todo deploy to default location
@@ -379,7 +341,45 @@ ops_cluster_remove () {
 
 
 ops_help () {
-    echo helping
+    echo \
+'[]: optional, (): required, <name>: fill with sth, |: or, ...: multiple
+    init [-b|--build include build.sh in master]
+        [-i|--install include install.sh and uninstall.sh in master]
+        [-s|--start include start.sh in master]
+        [--clone <repo>]
+        [--host <git host>]
+        [--no-config]
+        (-n|--name) <repo name> [...]
+        if --build is present deploying to 'build' branch triggers build.sh and pushes 'release' directory to 'release' branch.
+
+    deploy [-h --host <host>|-c --cluster <cluster>|-a --automatic]
+        deploy the project. it pushes 'master' to 'release'.
+        if build.sh is present. pushes 'master' to 'build' wich triggers a build and release will be updated.
+        --automatic will set the project
+
+    rollback [<host>]
+        rolls back the release and updates hosts.
+
+    config [-h --host <host>|-c --cluster <cluster>|-a --automatic]
+        push to a config repository
+
+    pm [ls|end|kill|log|stop|start|restart|status] <host>
+
+    host [ls|resolve <host>|add <host> <addr>|remove <host>|rename <host> <name>]
+
+    cluster (ls|add|remove) <name> [<host> ...]
+        when adding if cluster exists the given hosts will be added to existing cluster
+        if not the cluster will be made with given hosts.
+        when removing if one or some hosts are specified they will be removed from cluster
+        if no host is given the whole cluster will be removed.
+
+    install
+        installs ops and /etc/clusters
+
+    uninstall
+        uninstall ops binary
+
+    help [<cmd>]'
 }
 
 run $@
