@@ -413,6 +413,8 @@ ops_help () {
 
     install
         installs ops and /etc/clusters
+        to be used with
+        curl -s http://get.ops > /tmp/ops && chmod +x /tmp/ops && /tmp/ops install && rm /tmp/ops
 
     uninstall
         uninstalls ops script
