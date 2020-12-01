@@ -32,6 +32,10 @@ ops_uninstall () {
     which ops &> /dev/null || return 0
     sudo rm /usr/local/bin/ops
 }
+ops_update () {
+    ops_uninstall
+    ops_install
+}
 
 # runs default action
 ops_main () { ops_deploy; } # todo deploy to default location
@@ -411,7 +415,10 @@ ops_help () {
         installs ops and /etc/clusters
 
     uninstall
-        uninstall ops binary
+        uninstalls ops script
+
+    update
+        replaces old ops script with this script
 
     help [<cmd>]'
 }
