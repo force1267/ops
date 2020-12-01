@@ -37,8 +37,7 @@ ops_uninstall () {
 ops_main () { ops_deploy; } # todo deploy to default location
 
 # create a --bare git repo
-# automated deployments using release,secret branches
-# adds a standalone deploy script for dev
+# automated deployments using release/build branches and config repo
 ops_init () {
     names=()
     while [ $# -gt 0 ]; do
@@ -194,7 +193,27 @@ ops_init () {
 
 # deploy current project to a set of hosts
 ops_deploy () {
-    echo deploing
+    repo=$1
+    shift
+    hosts=()
+    while [ $# -gt 0 ]; do
+        case $1 in
+            -c|--cluster)
+                cluster=$2
+                shift 2
+                for host in `ops_cluster_resolve ${cluster}`; do
+                    hosts+=(${host})
+                done
+            ;;
+            *)
+                hosts+=($1)
+                shift
+            ;;
+        esac
+    done
+    # echo deploing to ${hosts[@]}
+
+    # TODO clone, build.sh, maybe stop, install.sh, start.sh
 }
 
 # process manager of ops
@@ -219,6 +238,11 @@ ops_host_main () { ops_host_ls; }
 # list hosts
 ops_host_ls () {
     cat /etc/hosts
+}
+# get a hosts address 'ops host resolve <name>'
+ops_host_resolve () {
+    name=$1
+    grep -E "\s${name}$" /etc/hosts | cut -d ' ' -f 1 | tail -n 1
 }
 # add a host to ops 'ops host add <name> <addr>'
 ops_host_add () {
@@ -267,6 +291,14 @@ ops_cluster_main () { ops_cluster_ls; }
 ops_cluster_ls () {
     cat /etc/clusters
 }
+# list a cluster's hosts 'ops cluster resolve <cluster>'
+ops_cluster_resolve () {
+    name=$1
+    for host in `grep -E "^${name}$|\s${name}$" /etc/clusters | rev | cut -s -d ' ' -f 2- | rev`; do
+        echo -n "${host} "
+    done
+    echo ""
+}
 
 # add a cluster or add hosts to existing cluster 'ops cluster add <name> <host> ...'
 ops_cluster_add () {
@@ -288,7 +320,7 @@ ops_cluster_add () {
     for host in "${hosts[@]}"; do
         hostmap[${host}]=${host}
     done
-    for host in `grep -E "^${name}$|\s${name}$" /etc/clusters | rev | cut -s -d ' ' -f 2- | rev`; do
+    for host in `ops_cluster_resolve ${name}`; do
         hostmap[${host}]=${host}
     done
     hosts="${hostmap[@]}"
@@ -321,7 +353,7 @@ ops_cluster_remove () {
         grep -v -E "^${name}$|.*\s${name}$" /etc/clusters | sudo tee /etc/clusters &> /dev/null
     else
         declare -A hostmap
-        for host in `grep -E "^${name}$|\s${name}$" /etc/clusters | rev | cut -s -d ' ' -f 2- | rev`; do
+        for host in `ops_cluster_resolve ${name}`; do
             hostmap[${host}]=${host}
         done
         for host in "${hosts[@]}"; do
@@ -352,22 +384,24 @@ ops_help () {
         (-n|--name) <repo name> [...]
         if --build is present deploying to 'build' branch triggers build.sh and pushes 'release' directory to 'release' branch.
 
-    deploy [-h --host <host>|-c --cluster <cluster>|-a --automatic]
-        deploy the project. it pushes 'master' to 'release'.
-        if build.sh is present. pushes 'master' to 'build' wich triggers a build and release will be updated.
-        --automatic will set the project
+    deploy <repo> <host> [... -c|cluster <cluster> ...]
+        example: ops deploy github.com/me/myrepo prod1 prod2 --cluster staging --cluster dev
+        deploys the project repo to given hosts and clusters.
+        if a repo with ".config" was found it will be used for secrets and environment.
+        deploy merges "master" to "release" and uses it.
+        if build.sh is present deploy will build the repo in local and pushes to "build" branch.
 
-    rollback [<host>]
+    rollback <repo> <host> [... -c|cluster <cluster> ...]
         rolls back the release and updates hosts.
 
-    config [-h --host <host>|-c --cluster <cluster>|-a --automatic]
-        push to a config repository
+    config <repo> <host> [... -c|cluster <cluster> ...]
+        changes the secrets and environments of deployed repo manually
 
-    pm [ls|end|kill|log|stop|start|restart|status] <host>
+    pm [ls|end|kill|log|stop|start|restart|status] [<name>] <host> [... -c|cluster <cluster> ...]
 
     host [ls|resolve <host>|add <host> <addr>|remove <host>|rename <host> <name>]
 
-    cluster (ls|add|remove) <name> [<host> ...]
+    cluster (ls|resolve|add|remove) <name> [<host> ...]
         when adding if cluster exists the given hosts will be added to existing cluster
         if not the cluster will be made with given hosts.
         when removing if one or some hosts are specified they will be removed from cluster
